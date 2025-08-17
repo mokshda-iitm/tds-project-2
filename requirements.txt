@@ -1,0 +1,15 @@
+fastapi==0.95.2
+uvicorn==0.22.0
+openai==0.27.8
+pandas==2.0.3
+numpy==1.24.3
+matplotlib==3.7.1
+seaborn==0.12.2
+requests==2.31.0
+python-multipart==0.0.6
+duckdb==0.8.1
+scipy==1.10.1
+python-dotenv==1.0.0  # Add this for .env support
+python-dotenv>=1.0.0
+html5lib
+beautifulsoup4

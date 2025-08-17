@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Data Analysis Report</title>
+    <style>
+        body { font-family: sans-serif; margin: 2rem; }
+        #report-container { border: 1px solid #ccc; padding: 1rem; margin-top: 1rem; }
+    </style>
+</head>
+<body>
+    <h1>Generate Data Analysis Report</h1>
+    <button onclick="fetchReport()">Get Report</button>
+    
+    <div id="report-container">
+        </div>
+
+    <script>
+    async function fetchReport() {
+        const ngrokUrl = 'https://<your-ngrok-id>.ngrok-free.app/api/';
+        
+        // Create the questions.txt file content dynamically
+        const questionsContent = `https://en.wikipedia.org/wiki/List_of_highest-grossing_films
+        What is the correlation between the all-time Rank and Peak rank of the films?
+        Which is the earliest film on this list to gross over $1.5 billion?
+        How many films grossed over $2 billion before the year 2000?
+        Generate a scatter plot showing the relationship between Rank and Peak.`;
+
+        // Use a File object to simulate a file upload
+        const questionsFile = new File([questionsContent], 'questions.txt', { type: 'text/plain' });
+        
+        const formData = new FormData();
+        formData.append('questions.txt', questionsFile);
+
+        try {
+            const response = await fetch(ngrokUrl, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const htmlContent = await response.text();
+            document.getElementById('report-container').innerHTML = htmlContent;
+        } catch (error) {
+            console.error('Error fetching data:', error);
+            document.getElementById('report-container').innerHTML = `<p>Error fetching report: ${error.message}</p>`;
+        }
+    }
+    </script>
+</body>
+</html>
