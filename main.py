@@ -6,7 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 from typing import List, Dict
@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Data Analyst Agent API",
-    description="API for generating downloadable HTML data analysis reports.",
-    version="3.3"
+    description="API for generating HTML and JSON data analysis reports.",
+    version="3.4"
 )
 
 # Enable CORS
@@ -132,7 +132,7 @@ class DataAnalystAgent:
                 if any(q in question.lower() for q in ['plot', 'graph', 'chart', 'scatter']):
                     if 'Rank' in df.columns and 'Peak' in df.columns:
                         answer = self._create_plot(df, 'Rank', 'Peak')
-                        answer_type = "plot"
+                        answer_type = "image"
                     else:
                         answer = "Could not generate plot: 'Rank' or 'Peak' columns not found."
 
@@ -184,24 +184,13 @@ class DataAnalystAgent:
 def extract_questions(text: str) -> List[str]:
     return [line.strip() for line in text.split('\n') if line.strip() and 'wikipedia.org' not in line]
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def read_root():
-    html_content = """
-    <!DOCTYPE html>
-    <html>
-        <head>
-            <title>Data Analyst Agent</title>
-        </head>
-        <body>
-            <h1>Welcome to the Data Analyst Agent API!</h1>
-            <p>The API endpoint is located at <a href="/api/">/api/</a>.</p>
-        </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content)
+    return {"message": "Welcome to the Data Analyst Agent API! The API endpoints are /api/ for JSON and /api/html for HTML."}
 
-@app.post("/api/", response_class=HTMLResponse)
-async def analyze_data(
+# Endpoint for JSON output
+@app.post("/api/", response_class=JSONResponse)
+async def analyze_data_json(
     questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with URL and questions")
 ):
     try:
@@ -219,7 +208,36 @@ async def analyze_data(
         
         agent = DataAnalystAgent()
         analysis_results = await agent.analyze_wikipedia(url, questions)
+        
+        return JSONResponse(content=analysis_results)
 
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Analysis failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
+
+# Endpoint for HTML output
+@app.post("/api/html", response_class=HTMLResponse)
+async def analyze_data_html(
+    questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with URL and questions")
+):
+    try:
+        content_bytes = await questions_file.read()
+        content_text = content_bytes.decode('utf-8').strip()
+        
+        url_match = re.search(r'https?://[^\s]+', content_text)
+        if not url_match:
+            raise HTTPException(status_code=400, detail="No URL found in the questions file.")
+        url = url_match.group(0)
+        
+        questions = extract_questions(content_text)
+        if not questions:
+            raise HTTPException(status_code=400, detail="No questions found in the file.")
+        
+        agent = DataAnalystAgent()
+        analysis_results = await agent.analyze_wikipedia(url, questions)
+        
         html_content = """
         <!DOCTYPE html>
         <html lang="en">
@@ -244,7 +262,7 @@ async def analyze_data(
         for item in analysis_results:
             html_content += '<div class="qa-pair">'
             html_content += f'<div class="question">❓ {item["question"]}</div>'
-            if item["type"] == "plot":
+            if item["type"] == "image":
                 html_content += f'<div class="answer"><img src="{item["answer"]}" alt="Generated Plot"></div>'
             else:
                 html_content += f'<div class="answer"><pre>{item["answer"]}</pre></div>'
@@ -263,3 +281,4 @@ async def analyze_data(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
