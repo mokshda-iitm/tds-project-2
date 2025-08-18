@@ -13,6 +13,10 @@ from typing import List, Dict
 import logging
 import re
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +45,7 @@ class DataAnalystAgent:
         self.api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent"
     
     async def _call_llm(self, prompt: str) -> str:
-        """Calls the Gemini API with a given prompt."""
+        """Calls the Gemini API with a given prompt, implementing exponential backoff."""
         retries = 3
         delay = 2
         for attempt in range(retries):
@@ -53,6 +57,18 @@ class DataAnalystAgent:
                 response.raise_for_status()
                 data = response.json()
                 return data['candidates'][0]['content']['parts'][0]['text'].strip().replace('**', '')
+            except requests.exceptions.HTTPError as e:
+                # Check for rate limit or server errors
+                if e.response.status_code in [429, 500, 503]:
+                    logger.warning(f"API call failed with status {e.response.status_code} on attempt {attempt + 1}. Retrying in {delay} seconds...")
+                    if attempt == retries - 1:
+                        logger.error(f"Final retry failed. Raising error: {e}")
+                        raise
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                else:
+                    logger.error(f"API call failed with unrecoverable error {e.response.status_code}: {e}")
+                    raise
             except Exception as e:
                 logger.error(f"LLM call failed on attempt {attempt + 1}: {e}")
                 if attempt == retries - 1:
@@ -101,7 +117,6 @@ class DataAnalystAgent:
         """
         try:
             # 1. Scrape and clean data
-            # Use BeautifulSoup to find the correct table and pass it to pandas
             response = requests.get(url, timeout=15)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, 'lxml')
@@ -184,7 +199,7 @@ class DataAnalystAgent:
             return results
 
         except Exception as e:
-            logger.error(f"Wikipedia analysis failed: {e}")
+            logger.error(f"Wikipedia analysis failed: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Data analysis error: {str(e)}")
 
 
