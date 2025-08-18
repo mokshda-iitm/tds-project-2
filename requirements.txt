@@ -13,3 +13,5 @@ python-dotenv==1.0.0  # Add this for .env support
 python-dotenv>=1.0.0
 html5lib
 beautifulsoup4
+setuptools
+
