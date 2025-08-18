@@ -12,6 +12,7 @@ import requests
 from typing import List, Dict
 import logging
 import re
+from bs4 import BeautifulSoup
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -100,9 +101,15 @@ class DataAnalystAgent:
         """
         try:
             # 1. Scrape and clean data
+            # Use BeautifulSoup to find the correct table and pass it to pandas
             response = requests.get(url, timeout=15)
             response.raise_for_status()
-            df = pd.read_html(io.StringIO(response.text), flavor='html5lib')[0]
+            soup = BeautifulSoup(response.text, 'lxml')
+            table = soup.find('table', {'class': 'wikitable'})
+            if table is None:
+                raise ValueError("Could not find a table with class 'wikitable' on the page.")
+            
+            df = pd.read_html(str(table), flavor='lxml')[0]
             
             # More robust data cleaning
             df.columns = [str(col) for col in df.columns]
