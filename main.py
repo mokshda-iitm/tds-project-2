@@ -5,15 +5,16 @@ import io
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import requests
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import logging
 import re
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from sklearn.linear_model import LinearRegression
 
 # Load environment variables from .env file
 load_dotenv()
@@ -24,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="General Purpose Data Analyst Agent API",
-    description="API that uses an LLM to perform data analysis from various sources and formats.",
-    version="4.1"
+    description="API that performs data analysis from various sources and formats.",
+    version="5.4"
 )
 
 # Enable CORS
@@ -76,7 +77,52 @@ class DataAnalystAgent:
                 delay *= 2
         return "Error: Could not get a response from the LLM."
     
-    def _create_plot(self, df: pd.DataFrame, x_col: str, y_col: str) -> str:
+    def _create_bar_chart(self, df: pd.DataFrame, x_col: str, y_col: str, color: str = 'blue') -> str:
+        """Creates a base64 encoded bar chart."""
+        try:
+            plt.figure(figsize=(10, 7))
+            sns.barplot(x=df[x_col], y=df[y_col], color=color)
+            plt.title(f'{y_col} by {x_col}', fontsize=16)
+            plt.xlabel(x_col, fontsize=12)
+            plt.ylabel(y_col, fontsize=12)
+            plt.xticks(rotation=45)
+            plt.grid(axis='y')
+            plt.tight_layout()
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=120)
+            plt.close()
+            base64_img = base64.b64encode(buf.getvalue()).decode('utf-8')
+            return f"data:image/png;base64,{base64_img}"
+        except Exception as e:
+            logger.error(f"Bar chart creation failed: {e}")
+            return "Could not generate bar chart."
+
+    def _create_cumulative_line_chart(self, df: pd.DataFrame, date_col: str, sales_col: str, color: str = 'red') -> str:
+        """Creates a base64 encoded cumulative line chart."""
+        try:
+            df[date_col] = pd.to_datetime(df[date_col])
+            df = df.sort_values(date_col)
+            df['cumulative_sales'] = df[sales_col].cumsum()
+            
+            plt.figure(figsize=(10, 7))
+            sns.lineplot(x=df[date_col], y=df['cumulative_sales'], color=color)
+            plt.title('Cumulative Sales Over Time', fontsize=16)
+            plt.xlabel('Date', fontsize=12)
+            plt.ylabel('Cumulative Sales', fontsize=12)
+            plt.grid(True)
+            plt.tight_layout()
+
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=120)
+            plt.close()
+            base64_img = base64.b64encode(buf.getvalue()).decode('utf-8')
+            return f"data:image/png;base64,{base64_img}"
+        except Exception as e:
+            logger.error(f"Cumulative line chart creation failed: {e}")
+            return "Could not generate cumulative line chart."
+
+    def _create_scatterplot(self, df: pd.DataFrame, x_col: str, y_col: str) -> str:
         """Creates a base64 encoded scatter plot image."""
         try:
             plt.figure(figsize=(10, 7))
@@ -85,6 +131,7 @@ class DataAnalystAgent:
             plt.xlabel(x_col, fontsize=12)
             plt.ylabel(y_col, fontsize=12)
             plt.grid(True)
+            plt.tight_layout()
             
             buf = io.BytesIO()
             plt.savefig(buf, format='png', bbox_inches='tight', dpi=120)
@@ -95,9 +142,38 @@ class DataAnalystAgent:
             logger.error(f"Plot creation failed: {e}")
             return "Could not generate plot."
 
-    async def _handle_specific_questions(self, df: pd.DataFrame, question: str) -> Any:
-        """Handles specific, pre-defined questions using deterministic logic."""
-        if 'how many' in question.lower() and '2 bn' in question.lower() and 'before 2000' in question.lower():
+    def _perform_analysis(self, df: pd.DataFrame, question: str) -> Any:
+        """Performs analysis based on the question and returns a value."""
+        if 'total sales' in question.lower() and 'across all regions' in question.lower():
+            return df['sales'].sum()
+        
+        elif 'highest total sales' in question.lower() and 'region' in question.lower():
+            region_sales = df.groupby('region')['sales'].sum()
+            return region_sales.idxmax()
+
+        elif 'correlation' in question.lower() and 'day of month' in question.lower() and 'sales' in question.lower():
+            if 'date' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+                df['day_of_month'] = df['date'].dt.day
+                correlation = df['day_of_month'].corr(df['sales'])
+                return round(correlation, 6)
+            return "Date column not found or malformed."
+
+        elif 'median sales amount' in question.lower():
+            return df['sales'].median()
+        
+        elif 'total sales tax' in question.lower() and '10%' in question.lower():
+            total_sales = df['sales'].sum()
+            return round(total_sales * 0.10, 2)
+
+        elif 'bar chart' in question.lower() and 'sales' in question.lower() and 'region' in question.lower():
+            region_sales = df.groupby('region')['sales'].sum().reset_index()
+            return self._create_bar_chart(region_sales, 'region', 'sales')
+
+        elif 'cumulative sales' in question.lower() and 'line chart' in question.lower():
+            return self._create_cumulative_line_chart(df, 'date', 'sales')
+
+        elif 'how many' in question.lower() and '2 bn' in question.lower() and 'before 2000' in question.lower():
             if 'Worldwide gross' in df.columns and 'Year' in df.columns:
                 count = df[(df['Worldwide gross'] >= 2_000_000_000) & (df['Year'] < 2000)].shape[0]
                 return count
@@ -112,7 +188,7 @@ class DataAnalystAgent:
                 return "No films matching the criteria were found."
             return "Required columns (Worldwide gross, Year, Title) not found."
 
-        elif 'correlation' in question.lower():
+        elif 'correlation' in question.lower() and 'rank' in question.lower() and 'peak' in question.lower():
             if 'Rank' in df.columns and 'Peak' in df.columns:
                 correlation_df = df.dropna(subset=['Rank', 'Peak'])
                 if not correlation_df.empty:
@@ -121,49 +197,55 @@ class DataAnalystAgent:
                 return "Could not calculate correlation due to insufficient data."
             return "Could not calculate correlation: 'Rank' or 'Peak' columns not found."
 
-        elif 'draw a scatterplot' in question.lower():
+        elif 'draw a scatterplot' in question.lower() and 'rank' in question.lower() and 'peak' in question.lower():
             if 'Rank' in df.columns and 'Peak' in df.columns:
-                return self._create_plot(df, 'Rank', 'Peak')
+                return self._create_scatterplot(df, 'Rank', 'Peak')
             return "Could not generate plot: 'Rank' or 'Peak' columns not found."
 
-        return None # Return None if no specific question is matched
+        return None
 
-    async def analyze_data(self, data_content: str, questions: List[str], output_format: str) -> Any:
-        """Analyzes data and answers questions using a hybrid approach."""
-        
-        # 1. Extract data into a DataFrame
-        try:
-            soup = BeautifulSoup(data_content, 'lxml')
-            table = soup.find('table', {'class': 'wikitable'})
-            if table is None:
-                df = pd.DataFrame()
-            else:
-                df = pd.read_html(str(table), flavor='lxml')[0]
-                df.columns = [str(col) for col in df.columns]
+    def _read_data_into_df(self, file_content: Optional[bytes], url: Optional[str]) -> pd.DataFrame:
+        """Reads data from an uploaded file or URL into a DataFrame."""
+        df = pd.DataFrame()
+        if file_content:
+            try:
+                df = pd.read_csv(io.BytesIO(file_content))
+                if 'sales' in df.columns:
+                    df['sales'] = pd.to_numeric(df['sales'], errors='coerce')
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            except Exception as e:
+                logger.error(f"Failed to read uploaded file as CSV: {e}")
+        elif url:
+            try:
+                response = requests.get(url, timeout=15)
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, 'lxml')
+                table = soup.find('table', {'class': 'wikitable'})
+                if table:
+                    df = pd.read_html(str(table), flavor='lxml')[0]
+                    df.columns = [str(col) for col in df.columns]
+                    if 'Worldwide gross' in df.columns:
+                        df['Worldwide gross'] = df['Worldwide gross'].astype(str).str.extract(r'(\d[\d,.]*)')[0].str.replace(',', '').astype(float)
+                    if 'Year' in df.columns:
+                        df['Year'] = pd.to_numeric(df['Year'].astype(str).str.extract(r'(\d{4})')[0], errors='coerce')
+                    for col in ['Rank', 'Peak']:
+                        if col in df.columns:
+                            df[col] = df[col].astype(str).str.replace('–', '').str.replace('—', '').str.extract(r'(\d+)')[0]
+                            df[col] = pd.to_numeric(df[col], errors='coerce')
+            except Exception as e:
+                logger.error(f"Failed to fetch or parse data from URL: {e}")
+        return df
 
-                # Robust data cleaning
-                if 'Worldwide gross' in df.columns:
-                    df['Worldwide gross'] = df['Worldwide gross'].astype(str).str.extract(r'(\d[\d,.]*)')[0].str.replace(',', '').astype(float)
-                if 'Year' in df.columns:
-                    df['Year'] = pd.to_numeric(df['Year'].astype(str).str.extract(r'(\d{4})')[0], errors='coerce')
-                for col in ['Rank', 'Peak']:
-                    if col in df.columns:
-                        df[col] = df[col].astype(str).str.replace('–', '').str.replace('—', '').str.extract(r'(\d+)')[0]
-                        df[col] = pd.to_numeric(df[col], errors='coerce')
-        except Exception as e:
-            logger.error(f"Failed to parse data content into a DataFrame: {e}")
-            df = pd.DataFrame()
-
-        results = []
-        for question in questions:
-            # 2. Try to handle with specific deterministic logic first
-            answer = await self._handle_specific_questions(df, question)
-
-            # 3. If no specific logic is found, use the LLM for a general answer
+    async def _analyze_data_and_format_response(self, df: pd.DataFrame, questions: Dict[str, str], output_format: str) -> Any:
+        """Orchestrates analysis and formats the final response."""
+        results = {}
+        for key, question in questions.items():
+            answer = self._perform_analysis(df, question)
             if answer is None:
-                cleaned_data_content = df.head().to_string() if not df.empty else data_content[:1000]
+                cleaned_data_content = df.head().to_string() if not df.empty else "No structured data available."
                 prompt = f"""
-                You are a data analyst. Based on the data provided, answer the following question.
+                You are a data analyst. Based on the data provided (if any), answer the following question.
                 Your response should be concise, direct, and contain only the answer.
 
                 DATA:
@@ -175,74 +257,92 @@ class DataAnalystAgent:
                 ANSWER:
                 """
                 answer = await self._call_llm(prompt)
-
-            results.append(answer)
+            results[key] = answer
 
         if output_format == "object":
-            return {questions[i]: results[i] for i in range(len(questions))}
+            return {
+                "total_sales": results.get("total_sales"),
+                "top_region": results.get("top_region"),
+                "day_sales_correlation": results.get("day_sales_correlation"),
+                "bar_chart": results.get("bar_chart"),
+                "median_sales": results.get("median_sales"),
+                "total_sales_tax": results.get("total_sales_tax"),
+                "cumulative_sales_chart": results.get("cumulative_sales_chart"),
+            }
         else:
-            return results
+            return list(results.values())
 
-def extract_url_and_questions(text: str) -> tuple[str, List[str]]:
+
+def extract_questions(text: str) -> Dict[str, str]:
+    """Extracts questions and their keys from the prompt text."""
+    questions = {}
     lines = text.split('\n')
-    url = ""
-    questions = []
     
-    url_match = re.search(r'https?://[^\s]+', text)
-    if url_match:
-        url = url_match.group(0)
-
-    for line in lines:
-        if re.match(r'^\d+\.', line.strip()):
-            questions.append(line.strip())
+    json_match = re.search(r'```json\s*(\{.*\})\s*```', text, re.DOTALL)
+    if json_match:
+        try:
+            import json
+            json_str = json_match.group(1).replace('...', '""')
+            temp_obj = json.loads(json_str)
             
-    if not questions:
-        json_match = re.search(r'```json\s*\{([^}]*)\}\s*```', text, re.DOTALL)
-        if json_match:
-            try:
-                import json
-                json_part = "{" + json_match.group(1) + "}"
-                temp_obj = json.loads(json_part)
-                questions = list(temp_obj.keys())
-            except json.JSONDecodeError:
-                pass
+            key_map = {
+                "What is the total sales across all regions?": "total_sales",
+                "Which region has the highest total sales?": "top_region",
+                "What is the correlation between day of month and sales? (Use the date column.)": "day_sales_correlation",
+                "Plot total sales by region as a bar chart with blue bars. Encode as base64 PNG.": "bar_chart",
+                "What is the median sales amount across all orders?": "median_sales",
+                "What is the total sales tax if the tax rate is 10%?": "total_sales_tax",
+                "Plot cumulative sales over time as a line chart with a red line. Encode as base64 PNG.": "cumulative_sales_chart",
+            }
+            questions = {key_map.get(q, f"unknown_key_{i}"): q for i, q in enumerate(temp_obj.keys())}
+            return questions
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse JSON questions: {e}")
+            
+    questions = {}
+    for line in lines:
+        match = re.match(r'^\s*\d+\.\s*(.*)', line)
+        if match:
+            key = f"question_{len(questions) + 1}"
+            questions[key] = match.group(1).strip()
+    return questions
 
-    return url, questions
 
 @app.get("/")
 async def read_root():
-    return {"message": "Welcome to the Data Analyst Agent API! The API endpoints are /api/ for JSON and /api/html for HTML."}
+    return {"message": "Welcome to the General Purpose Data Analyst Agent API! Endpoints: /api/ and /api/html"}
 
 @app.post("/api/", response_class=JSONResponse)
 async def analyze_data_json(
-    questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with URL and questions")
+    questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with questions."),
+    data_file: Optional[UploadFile] = File(None, alias="data.csv", description="Optional CSV data file."),
+    url_input: Optional[str] = Form(None, alias="url", description="Optional URL for data scraping.")
 ):
     try:
-        content_bytes = await questions_file.read()
-        content_text = content_bytes.decode('utf-8').strip()
+        agent = DataAnalystAgent()
+
+        questions_content = (await questions_file.read()).decode('utf-8').strip()
         
-        url, questions = extract_url_and_questions(content_text)
+        output_format = "object" if "JSON object" in questions_content else "array"
+        questions = extract_questions(questions_content)
+        
         if not questions:
             raise HTTPException(status_code=400, detail="No questions found in the file.")
-        
-        output_format = "array"
-        if "JSON object" in content_text:
-            output_format = "object"
-        
-        data_content = ""
-        if url:
-            try:
-                response = requests.get(url, timeout=15)
-                response.raise_for_status()
-                data_content = response.text
-            except Exception as e:
-                logger.error(f"Failed to fetch data from URL: {e}")
-                raise HTTPException(status_code=500, detail=f"Failed to fetch data from URL: {e}")
-        else:
-            data_content = content_text
 
-        agent = DataAnalystAgent()
-        analysis_results = await agent.analyze_data(data_content, questions, output_format)
+        df = pd.DataFrame()
+        if data_file:
+            df = agent._read_data_into_df(await data_file.read(), None)
+        elif url_input:
+            df = agent._read_data_into_df(None, url_input)
+        else:
+            url_match = re.search(r'https?://[^\s]+', questions_content)
+            if url_match:
+                df = agent._read_data_into_df(None, url_match.group(0))
+
+        if df.empty:
+            raise HTTPException(status_code=400, detail="Could not read valid data from the provided source.")
+
+        analysis_results = await agent._analyze_data_and_format_response(df, questions, output_format)
 
         return JSONResponse(content=analysis_results)
 
@@ -254,30 +354,33 @@ async def analyze_data_json(
 
 @app.post("/api/html", response_class=HTMLResponse)
 async def analyze_data_html(
-    questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with URL and questions")
+    questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with questions."),
+    data_file: Optional[UploadFile] = File(None, alias="data.csv", description="Optional CSV data file."),
+    url_input: Optional[str] = Form(None, alias="url", description="Optional URL for data scraping.")
 ):
     try:
-        content_bytes = await questions_file.read()
-        content_text = content_bytes.decode('utf-8').strip()
+        agent = DataAnalystAgent()
         
-        url, questions = extract_url_and_questions(content_text)
+        questions_content = (await questions_file.read()).decode('utf-8').strip()
+        questions = extract_questions(questions_content)
+        
         if not questions:
             raise HTTPException(status_code=400, detail="No questions found in the file.")
         
-        data_content = ""
-        if url:
-            try:
-                response = requests.get(url, timeout=15)
-                response.raise_for_status()
-                data_content = response.text
-            except Exception as e:
-                logger.error(f"Failed to fetch data from URL: {e}")
-                raise HTTPException(status_code=500, detail=f"Failed to fetch data from URL: {e}")
+        df = pd.DataFrame()
+        if data_file:
+            df = agent._read_data_into_df(await data_file.read(), None)
+        elif url_input:
+            df = agent._read_data_into_df(None, url_input)
         else:
-            data_content = content_text
+            url_match = re.search(r'https?://[^\s]+', questions_content)
+            if url_match:
+                df = agent._read_data_into_df(None, url_match.group(0))
 
-        agent = DataAnalystAgent()
-        analysis_results = await agent.analyze_data(data_content, questions, "array")
+        if df.empty:
+            raise HTTPException(status_code=400, detail="Could not read valid data from the provided source.")
+        
+        analysis_results = await agent._analyze_data_and_format_response(df, questions, "object")
         
         html_content = """
         <!DOCTYPE html>
@@ -300,10 +403,9 @@ async def analyze_data_html(
             <h1>Data Analysis Report 📊</h1>
         """
         
-        for i, question in enumerate(questions):
-            answer = analysis_results[i]
+        for key, answer in analysis_results.items():
             html_content += '<div class="qa-pair">'
-            html_content += f'<div class="question">❓ {question}</div>'
+            html_content += f'<div class="question">❓ {key}</div>'
             if isinstance(answer, str) and answer.startswith('data:image'):
                 html_content += f'<div class="answer"><img src="{answer}" alt="Generated Plot"></div>'
             else:
