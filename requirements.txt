@@ -13,3 +13,4 @@ python-dotenv
 lxml
 beautifulsoup4
 setuptools
+scikit-learn
