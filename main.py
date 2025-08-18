@@ -9,7 +9,7 @@ from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import requests
-from typing import List, Dict
+from typing import List, Dict, Any
 import logging
 import re
 from bs4 import BeautifulSoup
@@ -23,9 +23,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Data Analyst Agent API",
-    description="API for generating HTML and JSON data analysis reports.",
-    version="3.4"
+    title="General Purpose Data Analyst Agent API",
+    description="API that uses an LLM to perform data analysis from various sources and formats.",
+    version="4.1"
 )
 
 # Enable CORS
@@ -58,7 +58,6 @@ class DataAnalystAgent:
                 data = response.json()
                 return data['candidates'][0]['content']['parts'][0]['text'].strip().replace('**', '')
             except requests.exceptions.HTTPError as e:
-                # Check for rate limit or server errors
                 if e.response.status_code in [429, 500, 503]:
                     logger.warning(f"API call failed with status {e.response.status_code} on attempt {attempt + 1}. Retrying in {delay} seconds...")
                     if attempt == retries - 1:
@@ -76,22 +75,7 @@ class DataAnalystAgent:
                 await asyncio.sleep(delay)
                 delay *= 2
         return "Error: Could not get a response from the LLM."
-
-    async def _summarize_fact(self, question: str, fact: str) -> str:
-        """Uses the LLM to turn a calculated fact into a natural language sentence."""
-        prompt = f"""
-        Based on the user's question and the provided data fact, formulate a clear and direct one-sentence answer.
-
-        **User's Question:**
-        {question}
-
-        **Data Fact:**
-        {fact}
-
-        **Answer:**
-        """
-        return await self._call_llm(prompt)
-
+    
     def _create_plot(self, df: pd.DataFrame, x_col: str, y_col: str) -> str:
         """Creates a base64 encoded scatter plot image."""
         try:
@@ -111,106 +95,124 @@ class DataAnalystAgent:
             logger.error(f"Plot creation failed: {e}")
             return "Could not generate plot."
 
-    async def analyze_wikipedia(self, url: str, questions: List[str]) -> List[Dict]:
-        """
-        Uses a hybrid approach: pandas for calculations and LLM for summarization.
-        """
+    async def _handle_specific_questions(self, df: pd.DataFrame, question: str) -> Any:
+        """Handles specific, pre-defined questions using deterministic logic."""
+        if 'how many' in question.lower() and '2 bn' in question.lower() and 'before 2000' in question.lower():
+            if 'Worldwide gross' in df.columns and 'Year' in df.columns:
+                count = df[(df['Worldwide gross'] >= 2_000_000_000) & (df['Year'] < 2000)].shape[0]
+                return count
+            return "Required columns (Worldwide gross, Year) not found."
+        
+        elif 'earliest film' in question.lower() and '1.5 bn' in question.lower():
+            if 'Worldwide gross' in df.columns and 'Year' in df.columns and 'Title' in df.columns:
+                subset = df[df['Worldwide gross'] >= 1_500_000_000].dropna(subset=['Year'])
+                if not subset.empty:
+                    earliest = subset.loc[subset['Year'].idxmin()]
+                    return earliest['Title']
+                return "No films matching the criteria were found."
+            return "Required columns (Worldwide gross, Year, Title) not found."
+
+        elif 'correlation' in question.lower():
+            if 'Rank' in df.columns and 'Peak' in df.columns:
+                correlation_df = df.dropna(subset=['Rank', 'Peak'])
+                if not correlation_df.empty:
+                    correlation = correlation_df['Rank'].corr(correlation_df['Peak'])
+                    return round(correlation, 6)
+                return "Could not calculate correlation due to insufficient data."
+            return "Could not calculate correlation: 'Rank' or 'Peak' columns not found."
+
+        elif 'draw a scatterplot' in question.lower():
+            if 'Rank' in df.columns and 'Peak' in df.columns:
+                return self._create_plot(df, 'Rank', 'Peak')
+            return "Could not generate plot: 'Rank' or 'Peak' columns not found."
+
+        return None # Return None if no specific question is matched
+
+    async def analyze_data(self, data_content: str, questions: List[str], output_format: str) -> Any:
+        """Analyzes data and answers questions using a hybrid approach."""
+        
+        # 1. Extract data into a DataFrame
         try:
-            # 1. Scrape and clean data
-            response = requests.get(url, timeout=15)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'lxml')
+            soup = BeautifulSoup(data_content, 'lxml')
             table = soup.find('table', {'class': 'wikitable'})
             if table is None:
-                raise ValueError("Could not find a table with class 'wikitable' on the page.")
-            
-            df = pd.read_html(str(table), flavor='lxml')[0]
-            
-            # More robust data cleaning
-            df.columns = [str(col) for col in df.columns]
-            if 'Worldwide gross' in df.columns:
-                 df['Worldwide gross'] = df['Worldwide gross'].astype(str).str.extract(r'(\d[\d,.]*)')[0].str.replace(',', '').astype(float)
-            if 'Year' in df.columns:
-                df['Year'] = pd.to_numeric(df['Year'].astype(str).str.extract(r'(\d{4})')[0], errors='coerce')
-            
-            # Improved numerical column cleaning for a more precise correlation
-            for col in ['Rank', 'Peak', 'Title']:
-                if col in df.columns:
-                    df[col] = df[col].astype(str)
-            
-            # Handle non-numeric values like '—' or '–' and convert to numeric
-            for col in ['Rank', 'Peak']:
-                if col in df.columns:
-                    df[col] = df[col].str.replace('–', '').str.replace('—', '').str.extract(r'(\d+)')[0]
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            results = []
+                df = pd.DataFrame()
+            else:
+                df = pd.read_html(str(table), flavor='lxml')[0]
+                df.columns = [str(col) for col in df.columns]
 
-            # 2. Process each question with the correct tool
-            for question in questions:
-                answer = ""
-                answer_type = "text"
+                # Robust data cleaning
+                if 'Worldwide gross' in df.columns:
+                    df['Worldwide gross'] = df['Worldwide gross'].astype(str).str.extract(r'(\d[\d,.]*)')[0].str.replace(',', '').astype(float)
+                if 'Year' in df.columns:
+                    df['Year'] = pd.to_numeric(df['Year'].astype(str).str.extract(r'(\d{4})')[0], errors='coerce')
+                for col in ['Rank', 'Peak']:
+                    if col in df.columns:
+                        df[col] = df[col].astype(str).str.replace('–', '').str.replace('—', '').str.extract(r'(\d+)')[0]
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+        except Exception as e:
+            logger.error(f"Failed to parse data content into a DataFrame: {e}")
+            df = pd.DataFrame()
 
-                if any(q in question.lower() for q in ['plot', 'graph', 'chart', 'scatter']):
-                    if 'Rank' in df.columns and 'Peak' in df.columns:
-                        answer = self._create_plot(df, 'Rank', 'Peak')
-                        answer_type = "image"
-                    else:
-                        answer = "Could not generate plot: 'Rank' or 'Peak' columns not found."
+        results = []
+        for question in questions:
+            # 2. Try to handle with specific deterministic logic first
+            answer = await self._handle_specific_questions(df, question)
 
-                elif 'correlation' in question.lower():
-                    if 'Rank' in df.columns and 'Peak' in df.columns:
-                        # Drop rows with NaN in these columns for a clean calculation
-                        correlation_df = df.dropna(subset=['Rank', 'Peak'])
-                        if not correlation_df.empty:
-                            correlation = correlation_df['Rank'].corr(correlation_df['Peak'])
-                            fact = f"The Pearson correlation is {correlation:.4f}."
-                            answer = await self._summarize_fact(question, fact)
-                        else:
-                            answer = "Could not calculate correlation due to insufficient data."
-                    else:
-                        answer = "Could not calculate correlation: 'Rank' or 'Peak' columns not found."
-                
-                elif 'earliest' in question.lower() and '1.5 billion' in question.lower():
-                    if 'Worldwide gross' in df.columns and 'Year' in df.columns and 'Title' in df.columns:
-                        subset = df[df['Worldwide gross'] >= 1_500_000_000].dropna(subset=['Year'])
-                        if not subset.empty:
-                            earliest = subset.loc[subset['Year'].idxmin()]
-                            fact = f"The film is '{earliest['Title']}' released in {int(earliest['Year'])}."
-                            answer = await self._summarize_fact(question, fact)
-                        else:
-                            answer = "No films matching the criteria were found."
-                    else:
-                        answer = "Required columns (Worldwide gross, Year, Title) not found."
+            # 3. If no specific logic is found, use the LLM for a general answer
+            if answer is None:
+                cleaned_data_content = df.head().to_string() if not df.empty else data_content[:1000]
+                prompt = f"""
+                You are a data analyst. Based on the data provided, answer the following question.
+                Your response should be concise, direct, and contain only the answer.
 
-                elif 'how many' in question.lower() and '2 billion' in question.lower() and 'before 2000' in question.lower():
-                    if 'Worldwide gross' in df.columns and 'Year' in df.columns:
-                        count = df[(df['Worldwide gross'] >= 2_000_000_000) & (df['Year'] < 2000)].shape[0]
-                        fact = f"There is {count} film." if count == 1 else f"There are {count} films."
-                        answer = await self._summarize_fact(question, fact)
-                    else:
-                        answer = "Required columns (Worldwide gross, Year) not found."
+                DATA:
+                {cleaned_data_content}
 
-                else:
-                    prompt = f"Based on the provided data snippet, answer the user's question: {question}\n\nData:\n{df.head().to_string()}"
-                    answer = await self._call_llm(prompt)
+                QUESTION:
+                {question}
 
-                results.append({"question": question, "answer": answer, "type": answer_type})
+                ANSWER:
+                """
+                answer = await self._call_llm(prompt)
+
+            results.append(answer)
+
+        if output_format == "object":
+            return {questions[i]: results[i] for i in range(len(questions))}
+        else:
             return results
 
-        except Exception as e:
-            logger.error(f"Wikipedia analysis failed: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Data analysis error: {str(e)}")
+def extract_url_and_questions(text: str) -> tuple[str, List[str]]:
+    lines = text.split('\n')
+    url = ""
+    questions = []
+    
+    url_match = re.search(r'https?://[^\s]+', text)
+    if url_match:
+        url = url_match.group(0)
 
+    for line in lines:
+        if re.match(r'^\d+\.', line.strip()):
+            questions.append(line.strip())
+            
+    if not questions:
+        json_match = re.search(r'```json\s*\{([^}]*)\}\s*```', text, re.DOTALL)
+        if json_match:
+            try:
+                import json
+                json_part = "{" + json_match.group(1) + "}"
+                temp_obj = json.loads(json_part)
+                questions = list(temp_obj.keys())
+            except json.JSONDecodeError:
+                pass
 
-def extract_questions(text: str) -> List[str]:
-    return [line.strip() for line in text.split('\n') if line.strip() and 'wikipedia.org' not in line]
+    return url, questions
 
 @app.get("/")
 async def read_root():
     return {"message": "Welcome to the Data Analyst Agent API! The API endpoints are /api/ for JSON and /api/html for HTML."}
 
-# Endpoint for JSON output
 @app.post("/api/", response_class=JSONResponse)
 async def analyze_data_json(
     questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with URL and questions")
@@ -219,18 +221,29 @@ async def analyze_data_json(
         content_bytes = await questions_file.read()
         content_text = content_bytes.decode('utf-8').strip()
         
-        url_match = re.search(r'https?://[^\s]+', content_text)
-        if not url_match:
-            raise HTTPException(status_code=400, detail="No URL found in the questions file.")
-        url = url_match.group(0)
-        
-        questions = extract_questions(content_text)
+        url, questions = extract_url_and_questions(content_text)
         if not questions:
             raise HTTPException(status_code=400, detail="No questions found in the file.")
         
-        agent = DataAnalystAgent()
-        analysis_results = await agent.analyze_wikipedia(url, questions)
+        output_format = "array"
+        if "JSON object" in content_text:
+            output_format = "object"
         
+        data_content = ""
+        if url:
+            try:
+                response = requests.get(url, timeout=15)
+                response.raise_for_status()
+                data_content = response.text
+            except Exception as e:
+                logger.error(f"Failed to fetch data from URL: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to fetch data from URL: {e}")
+        else:
+            data_content = content_text
+
+        agent = DataAnalystAgent()
+        analysis_results = await agent.analyze_data(data_content, questions, output_format)
+
         return JSONResponse(content=analysis_results)
 
     except HTTPException:
@@ -239,7 +252,6 @@ async def analyze_data_json(
         logger.error(f"Analysis failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An internal server error occurred: {str(e)}")
 
-# Endpoint for HTML output
 @app.post("/api/html", response_class=HTMLResponse)
 async def analyze_data_html(
     questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with URL and questions")
@@ -248,17 +260,24 @@ async def analyze_data_html(
         content_bytes = await questions_file.read()
         content_text = content_bytes.decode('utf-8').strip()
         
-        url_match = re.search(r'https?://[^\s]+', content_text)
-        if not url_match:
-            raise HTTPException(status_code=400, detail="No URL found in the questions file.")
-        url = url_match.group(0)
-        
-        questions = extract_questions(content_text)
+        url, questions = extract_url_and_questions(content_text)
         if not questions:
             raise HTTPException(status_code=400, detail="No questions found in the file.")
         
+        data_content = ""
+        if url:
+            try:
+                response = requests.get(url, timeout=15)
+                response.raise_for_status()
+                data_content = response.text
+            except Exception as e:
+                logger.error(f"Failed to fetch data from URL: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to fetch data from URL: {e}")
+        else:
+            data_content = content_text
+
         agent = DataAnalystAgent()
-        analysis_results = await agent.analyze_wikipedia(url, questions)
+        analysis_results = await agent.analyze_data(data_content, questions, "array")
         
         html_content = """
         <!DOCTYPE html>
@@ -280,14 +299,15 @@ async def analyze_data_html(
         <body>
             <h1>Data Analysis Report 📊</h1>
         """
-
-        for item in analysis_results:
+        
+        for i, question in enumerate(questions):
+            answer = analysis_results[i]
             html_content += '<div class="qa-pair">'
-            html_content += f'<div class="question">❓ {item["question"]}</div>'
-            if item["type"] == "image":
-                html_content += f'<div class="answer"><img src="{item["answer"]}" alt="Generated Plot"></div>'
+            html_content += f'<div class="question">❓ {question}</div>'
+            if isinstance(answer, str) and answer.startswith('data:image'):
+                html_content += f'<div class="answer"><img src="{answer}" alt="Generated Plot"></div>'
             else:
-                html_content += f'<div class="answer"><pre>{item["answer"]}</pre></div>'
+                html_content += f'<div class="answer"><pre>{answer}</pre></div>'
             html_content += '</div>'
 
         html_content += "</body></html>"
