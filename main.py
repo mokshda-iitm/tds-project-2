@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="General Purpose Data Analyst Agent API",
     description="API that performs data analysis from various sources and formats.",
-    version="5.4"
+    version="5.6"
 )
 
 # Enable CORS
@@ -425,4 +425,3 @@ async def analyze_data_html(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
