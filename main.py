@@ -5,7 +5,7 @@ import io
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import requests
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="General Purpose Data Analyst Agent API",
     description="API that performs data analysis from various sources and formats.",
-    version="5.6"
+    version="6.5"
 )
 
 # Enable CORS
@@ -145,26 +145,26 @@ class DataAnalystAgent:
     def _perform_analysis(self, df: pd.DataFrame, question: str) -> Any:
         """Performs analysis based on the question and returns a value."""
         if 'total sales' in question.lower() and 'across all regions' in question.lower():
-            return df['sales'].sum()
+            return float(df['sales'].sum())
         
         elif 'highest total sales' in question.lower() and 'region' in question.lower():
             region_sales = df.groupby('region')['sales'].sum()
-            return region_sales.idxmax()
+            return str(region_sales.idxmax())
 
         elif 'correlation' in question.lower() and 'day of month' in question.lower() and 'sales' in question.lower():
             if 'date' in df.columns:
                 df['date'] = pd.to_datetime(df['date'])
                 df['day_of_month'] = df['date'].dt.day
                 correlation = df['day_of_month'].corr(df['sales'])
-                return round(correlation, 6)
+                return float(round(correlation, 6))
             return "Date column not found or malformed."
 
         elif 'median sales amount' in question.lower():
-            return df['sales'].median()
+            return float(df['sales'].median())
         
         elif 'total sales tax' in question.lower() and '10%' in question.lower():
             total_sales = df['sales'].sum()
-            return round(total_sales * 0.10, 2)
+            return float(round(total_sales * 0.10, 2))
 
         elif 'bar chart' in question.lower() and 'sales' in question.lower() and 'region' in question.lower():
             region_sales = df.groupby('region')['sales'].sum().reset_index()
@@ -176,7 +176,7 @@ class DataAnalystAgent:
         elif 'how many' in question.lower() and '2 bn' in question.lower() and 'before 2000' in question.lower():
             if 'Worldwide gross' in df.columns and 'Year' in df.columns:
                 count = df[(df['Worldwide gross'] >= 2_000_000_000) & (df['Year'] < 2000)].shape[0]
-                return count
+                return int(count)
             return "Required columns (Worldwide gross, Year) not found."
         
         elif 'earliest film' in question.lower() and '1.5 bn' in question.lower():
@@ -184,7 +184,7 @@ class DataAnalystAgent:
                 subset = df[df['Worldwide gross'] >= 1_500_000_000].dropna(subset=['Year'])
                 if not subset.empty:
                     earliest = subset.loc[subset['Year'].idxmin()]
-                    return earliest['Title']
+                    return str(earliest['Title'])
                 return "No films matching the criteria were found."
             return "Required columns (Worldwide gross, Year, Title) not found."
 
@@ -193,7 +193,7 @@ class DataAnalystAgent:
                 correlation_df = df.dropna(subset=['Rank', 'Peak'])
                 if not correlation_df.empty:
                     correlation = correlation_df['Rank'].corr(correlation_df['Peak'])
-                    return round(correlation, 6)
+                    return float(round(correlation, 6))
                 return "Could not calculate correlation due to insufficient data."
             return "Could not calculate correlation: 'Rank' or 'Peak' columns not found."
 
@@ -274,39 +274,122 @@ class DataAnalystAgent:
 
 
 def extract_questions(text: str) -> Dict[str, str]:
-    """Extracts questions and their keys from the prompt text."""
+    """
+    Extracts questions and their keys from the prompt text,
+    handling various formats including JSON, numbered lists, and bullet points.
+    """
     questions = {}
-    lines = text.split('\n')
     
+    # Try to extract JSON format first
     json_match = re.search(r'```json\s*(\{.*\})\s*```', text, re.DOTALL)
     if json_match:
         try:
             import json
-            json_str = json_match.group(1).replace('...', '""')
+            json_str = json_match.group(1)
+            # Clean up common JSON issues
+            json_str = re.sub(r'\.\.\.', '""', json_str)
+            json_str = re.sub(r'//.*?\n', '', json_str)  # Remove comments
             temp_obj = json.loads(json_str)
             
-            key_map = {
+            # Map common question patterns to consistent keys
+            key_mapping = {
                 "What is the total sales across all regions?": "total_sales",
                 "Which region has the highest total sales?": "top_region",
-                "What is the correlation between day of month and sales? (Use the date column.)": "day_sales_correlation",
-                "Plot total sales by region as a bar chart with blue bars. Encode as base64 PNG.": "bar_chart",
+                "What is the correlation between day of month and sales?": "day_sales_correlation",
+                "Plot total sales by region as a bar chart": "bar_chart",
                 "What is the median sales amount across all orders?": "median_sales",
                 "What is the total sales tax if the tax rate is 10%?": "total_sales_tax",
-                "Plot cumulative sales over time as a line chart with a red line. Encode as base64 PNG.": "cumulative_sales_chart",
+                "Plot cumulative sales over time as a line chart": "cumulative_sales_chart",
+                "How many films reached $2 billion before 2000?": "films_2bn_before_2000",
+                "What is the earliest film to reach $1.5 billion?": "earliest_1_5bn_film",
+                "What is the correlation between Rank and Peak positions?": "rank_peak_correlation",
+                "Draw a scatterplot of Rank vs Peak positions": "rank_peak_scatterplot"
             }
-            questions = {key_map.get(q, f"unknown_key_{i}"): q for i, q in enumerate(temp_obj.keys())}
-            return questions
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON questions: {e}")
             
-    questions = {}
+            for question_text in temp_obj.keys():
+                # Find the best matching key
+                matched_key = None
+                for pattern, key in key_mapping.items():
+                    if pattern.lower() in question_text.lower():
+                        matched_key = key
+                        break
+                
+                if matched_key:
+                    questions[matched_key] = question_text.strip()
+                else:
+                    # Generate a safe key name
+                    safe_key = re.sub(r'[^a-zA-Z0-9_]', '_', question_text.lower())[:30]
+                    questions[safe_key] = question_text.strip()
+            
+            if questions:
+                return questions
+                
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON questions: {e}")
+            # Continue with other extraction methods
+    
+    # Extract questions from various list formats
+    lines = text.split('\n')
+    question_patterns = [
+        r'^(?:\d+[\.\)]?\s+)(.*?[?])',  # Numbered: 1. Question? or 1) Question?
+        r'^[-*•]\s+(.*?[?])',           # Bullet points: - Question? or * Question?
+        r'^"\s*(.*?[?])\s*"',           # Quoted: "Question?"
+        r'^(.*?[?])\s*$'                # Standalone questions ending with ?
+    ]
+    
+    question_count = 0
     for line in lines:
-        match = re.match(r'^\s*\d+\.\s*(.*)', line)
-        if match:
-            key = f"question_{len(questions) + 1}"
-            questions[key] = match.group(1).strip()
+        line = line.strip()
+        if not line or len(line) < 10:  # Skip short lines
+            continue
+            
+        for pattern in question_patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match and '?' in match.group(1):
+                question_text = match.group(1).strip()
+                if len(question_text) > 8:  # Reasonable minimum length
+                    # Create a standardized key
+                    key = f"question_{question_count + 1}"
+                    
+                    # Try to map to known keys for consistency
+                    if 'total sales' in question_text.lower() and 'region' in question_text.lower():
+                        key = 'total_sales'
+                    elif 'highest' in question_text.lower() and 'region' in question_text.lower():
+                        key = 'top_region'
+                    elif 'correlation' in question_text.lower() and 'day' in question_text.lower():
+                        key = 'day_sales_correlation'
+                    elif 'bar chart' in question_text.lower() and 'sales' in question_text.lower():
+                        key = 'bar_chart'
+                    elif 'median' in question_text.lower() and 'sales' in question_text.lower():
+                        key = 'median_sales'
+                    elif 'tax' in question_text.lower() and '10%' in question_text.lower():
+                        key = 'total_sales_tax'
+                    elif 'cumulative' in question_text.lower() and 'line chart' in question_text.lower():
+                        key = 'cumulative_sales_chart'
+                    
+                    questions[key] = question_text
+                    question_count += 1
+                    break
+    
+    # If no questions found with patterns, look for any lines containing question marks
+    if not questions:
+        for line in lines:
+            line = line.strip()
+            if '?' in line and len(line) > 10:
+                # Extract the question part
+                question_match = re.search(r'([^.?]*\?)', line)
+                if question_match:
+                    question_text = question_match.group(1).strip()
+                    key = f"question_{len(questions) + 1}"
+                    questions[key] = question_text
+    
+    # Log what was extracted for debugging
+    if questions:
+        logger.info(f"Extracted {len(questions)} questions: {list(questions.keys())}")
+    else:
+        logger.warning("No questions could be extracted from the text")
+    
     return questions
-
 
 @app.get("/")
 async def read_root():
@@ -314,22 +397,27 @@ async def read_root():
 
 @app.post("/api/", response_class=JSONResponse)
 async def analyze_data_json(
-    questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with questions."),
-    data_file: Optional[UploadFile] = File(None, alias="data.csv", description="Optional CSV data file."),
-    url_input: Optional[str] = Form(None, alias="url", description="Optional URL for data scraping.")
+    request: Request,
+    questions_file: Optional[UploadFile] = File(None, alias="questions.txt"),
+    data_file: Optional[UploadFile] = File(None, alias="data.csv"),
+    url_input: Optional[str] = Form(None, alias="url")
 ):
     try:
         agent = DataAnalystAgent()
+        questions_content = ""
+        df = pd.DataFrame()
 
-        questions_content = (await questions_file.read()).decode('utf-8').strip()
-        
+        if questions_file:
+            questions_content = (await questions_file.read()).decode('utf-8').strip()
+        else:
+            questions_content = (await request.body()).decode('utf-8').strip()
+
         output_format = "object" if "JSON object" in questions_content else "array"
         questions = extract_questions(questions_content)
         
         if not questions:
             raise HTTPException(status_code=400, detail="No questions found in the file.")
 
-        df = pd.DataFrame()
         if data_file:
             df = agent._read_data_into_df(await data_file.read(), None)
         elif url_input:
@@ -354,14 +442,20 @@ async def analyze_data_json(
 
 @app.post("/api/html", response_class=HTMLResponse)
 async def analyze_data_html(
-    questions_file: UploadFile = File(..., alias="questions.txt", description="Text file with questions."),
-    data_file: Optional[UploadFile] = File(None, alias="data.csv", description="Optional CSV data file."),
-    url_input: Optional[str] = Form(None, alias="url", description="Optional URL for data scraping.")
+    request: Request,
+    questions_file: Optional[UploadFile] = File(None, alias="questions.txt"),
+    data_file: Optional[UploadFile] = File(None, alias="data.csv"),
+    url_input: Optional[str] = Form(None, alias="url")
 ):
     try:
         agent = DataAnalystAgent()
+        questions_content = ""
         
-        questions_content = (await questions_file.read()).decode('utf-8').strip()
+        if questions_file:
+            questions_content = (await questions_file.read()).decode('utf-8').strip()
+        else:
+            questions_content = (await request.body()).decode('utf-8').strip()
+
         questions = extract_questions(questions_content)
         
         if not questions:
@@ -425,3 +519,4 @@ async def analyze_data_html(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
