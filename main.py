@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="General Purpose Data Analyst Agent API",
     description="API that performs data analysis from various sources and formats.",
-    version="6.5"
+    version="6.6"
 )
 
 # Enable CORS
@@ -268,6 +268,10 @@ class DataAnalystAgent:
                 "median_sales": results.get("median_sales"),
                 "total_sales_tax": results.get("total_sales_tax"),
                 "cumulative_sales_chart": results.get("cumulative_sales_chart"),
+                "films_2bn_before_2000": results.get("films_2bn_before_2000"),
+                "earliest_1_5bn_film": results.get("earliest_1_5bn_film"),
+                "rank_peak_correlation": results.get("rank_peak_correlation"),
+                "rank_peak_scatterplot": results.get("rank_peak_scatterplot"),
             }
         else:
             return list(results.values())
@@ -276,120 +280,130 @@ class DataAnalystAgent:
 def extract_questions(text: str) -> Dict[str, str]:
     """
     Extracts questions and their keys from the prompt text,
-    handling various formats including JSON, numbered lists, and bullet points.
+    handling various formats and mapping to expected analysis keys.
     """
     questions = {}
     
-    # Try to extract JSON format first
+    # First, try to extract from JSON format
     json_match = re.search(r'```json\s*(\{.*\})\s*```', text, re.DOTALL)
     if json_match:
         try:
             import json
             json_str = json_match.group(1)
-            # Clean up common JSON issues
             json_str = re.sub(r'\.\.\.', '""', json_str)
-            json_str = re.sub(r'//.*?\n', '', json_str)  # Remove comments
+            json_str = re.sub(r'//.*?\n', '', json_str)
             temp_obj = json.loads(json_str)
             
-            # Map common question patterns to consistent keys
-            key_mapping = {
-                "What is the total sales across all regions?": "total_sales",
-                "Which region has the highest total sales?": "top_region",
-                "What is the correlation between day of month and sales?": "day_sales_correlation",
-                "Plot total sales by region as a bar chart": "bar_chart",
-                "What is the median sales amount across all orders?": "median_sales",
-                "What is the total sales tax if the tax rate is 10%?": "total_sales_tax",
-                "Plot cumulative sales over time as a line chart": "cumulative_sales_chart",
-                "How many films reached $2 billion before 2000?": "films_2bn_before_2000",
-                "What is the earliest film to reach $1.5 billion?": "earliest_1_5bn_film",
-                "What is the correlation between Rank and Peak positions?": "rank_peak_correlation",
-                "Draw a scatterplot of Rank vs Peak positions": "rank_peak_scatterplot"
-            }
-            
+            # Direct mapping for known question patterns
             for question_text in temp_obj.keys():
-                # Find the best matching key
-                matched_key = None
-                for pattern, key in key_mapping.items():
-                    if pattern.lower() in question_text.lower():
-                        matched_key = key
-                        break
+                q_lower = question_text.lower()
                 
-                if matched_key:
-                    questions[matched_key] = question_text.strip()
+                if 'total sales' in q_lower and 'across all regions' in q_lower:
+                    questions['total_sales'] = question_text.strip()
+                elif 'highest total sales' in q_lower and 'region' in q_lower:
+                    questions['top_region'] = question_text.strip()
+                elif 'correlation' in q_lower and 'day of month' in q_lower and 'sales' in q_lower:
+                    questions['day_sales_correlation'] = question_text.strip()
+                elif 'bar chart' in q_lower and 'sales' in q_lower and 'region' in q_lower:
+                    questions['bar_chart'] = question_text.strip()
+                elif 'median sales amount' in q_lower:
+                    questions['median_sales'] = question_text.strip()
+                elif 'total sales tax' in q_lower and '10%' in q_lower:
+                    questions['total_sales_tax'] = question_text.strip()
+                elif 'cumulative sales' in q_lower and 'line chart' in q_lower:
+                    questions['cumulative_sales_chart'] = question_text.strip()
+                elif '2 bn' in q_lower and 'before 2000' in q_lower:
+                    questions['films_2bn_before_2000'] = question_text.strip()
+                elif 'earliest film' in q_lower and '1.5 bn' in q_lower:
+                    questions['earliest_1_5bn_film'] = question_text.strip()
+                elif 'correlation' in q_lower and 'rank' in q_lower and 'peak' in q_lower:
+                    questions['rank_peak_correlation'] = question_text.strip()
+                elif 'scatterplot' in q_lower and 'rank' in q_lower and 'peak' in q_lower:
+                    questions['rank_peak_scatterplot'] = question_text.strip()
                 else:
-                    # Generate a safe key name
+                    # Fallback: create safe key
                     safe_key = re.sub(r'[^a-zA-Z0-9_]', '_', question_text.lower())[:30]
                     questions[safe_key] = question_text.strip()
             
-            if questions:
-                return questions
+            return questions
                 
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse JSON questions: {e}")
-            # Continue with other extraction methods
     
-    # Extract questions from various list formats
+    # If no JSON or JSON parsing failed, extract from text
     lines = text.split('\n')
-    question_patterns = [
-        r'^(?:\d+[\.\)]?\s+)(.*?[?])',  # Numbered: 1. Question? or 1) Question?
-        r'^[-*•]\s+(.*?[?])',           # Bullet points: - Question? or * Question?
-        r'^"\s*(.*?[?])\s*"',           # Quoted: "Question?"
-        r'^(.*?[?])\s*$'                # Standalone questions ending with ?
-    ]
-    
     question_count = 0
+    
     for line in lines:
         line = line.strip()
-        if not line or len(line) < 10:  # Skip short lines
+        if not line or len(line) < 10:
             continue
             
-        for pattern in question_patterns:
+        # Look for question patterns
+        question_match = None
+        patterns = [
+            r'^(?:\d+[\.\)]?\s+)(.*?[?])',  # Numbered lists
+            r'^[-*•]\s+(.*?[?])',           # Bullet points
+            r'^"\s*(.*?[?])\s*"',           # Quoted questions
+            r'^(.*?[?])\s*$'                # Standalone questions
+        ]
+        
+        for pattern in patterns:
             match = re.search(pattern, line, re.IGNORECASE)
             if match and '?' in match.group(1):
-                question_text = match.group(1).strip()
-                if len(question_text) > 8:  # Reasonable minimum length
-                    # Create a standardized key
-                    key = f"question_{question_count + 1}"
-                    
-                    # Try to map to known keys for consistency
-                    if 'total sales' in question_text.lower() and 'region' in question_text.lower():
-                        key = 'total_sales'
-                    elif 'highest' in question_text.lower() and 'region' in question_text.lower():
-                        key = 'top_region'
-                    elif 'correlation' in question_text.lower() and 'day' in question_text.lower():
-                        key = 'day_sales_correlation'
-                    elif 'bar chart' in question_text.lower() and 'sales' in question_text.lower():
-                        key = 'bar_chart'
-                    elif 'median' in question_text.lower() and 'sales' in question_text.lower():
-                        key = 'median_sales'
-                    elif 'tax' in question_text.lower() and '10%' in question_text.lower():
-                        key = 'total_sales_tax'
-                    elif 'cumulative' in question_text.lower() and 'line chart' in question_text.lower():
-                        key = 'cumulative_sales_chart'
-                    
-                    questions[key] = question_text
-                    question_count += 1
-                    break
+                question_match = match.group(1).strip()
+                break
+        
+        if not question_match:
+            # Try to extract any question from the line
+            q_match = re.search(r'([^.!]*\?)', line)
+            if q_match:
+                question_match = q_match.group(1).strip()
+        
+        if question_match and len(question_match) > 8:
+            q_lower = question_match.lower()
+            key = None
+            
+            # Map to expected analysis keys
+            if 'total sales' in q_lower and 'across all regions' in q_lower:
+                key = 'total_sales'
+            elif 'highest total sales' in q_lower and 'region' in q_lower:
+                key = 'top_region'
+            elif 'correlation' in q_lower and 'day of month' in q_lower and 'sales' in q_lower:
+                key = 'day_sales_correlation'
+            elif 'bar chart' in q_lower and 'sales' in q_lower and 'region' in q_lower:
+                key = 'bar_chart'
+            elif 'median sales amount' in q_lower:
+                key = 'median_sales'
+            elif 'total sales tax' in q_lower and '10%' in q_lower:
+                key = 'total_sales_tax'
+            elif 'cumulative sales' in q_lower and 'line chart' in q_lower:
+                key = 'cumulative_sales_chart'
+            elif '2 bn' in q_lower and 'before 2000' in q_lower:
+                key = 'films_2bn_before_2000'
+            elif 'earliest film' in q_lower and '1.5 bn' in q_lower:
+                key = 'earliest_1_5bn_film'
+            elif 'correlation' in q_lower and 'rank' in q_lower and 'peak' in q_lower:
+                key = 'rank_peak_correlation'
+            elif 'scatterplot' in q_lower and 'rank' in q_lower and 'peak' in q_lower:
+                key = 'rank_peak_scatterplot'
+            else:
+                # Use generic key for unmapped questions
+                key = f"question_{question_count + 1}"
+            
+            questions[key] = question_match
+            question_count += 1
     
-    # If no questions found with patterns, look for any lines containing question marks
-    if not questions:
-        for line in lines:
-            line = line.strip()
-            if '?' in line and len(line) > 10:
-                # Extract the question part
-                question_match = re.search(r'([^.?]*\?)', line)
-                if question_match:
-                    question_text = question_match.group(1).strip()
-                    key = f"question_{len(questions) + 1}"
-                    questions[key] = question_text
-    
-    # Log what was extracted for debugging
+    # Log for debugging
     if questions:
         logger.info(f"Extracted {len(questions)} questions: {list(questions.keys())}")
     else:
         logger.warning("No questions could be extracted from the text")
+        # Return at least one question to avoid 400 error
+        questions['default_question'] = "What analysis can you perform on this data?"
     
     return questions
+
 
 @app.get("/")
 async def read_root():
@@ -519,4 +533,3 @@ async def analyze_data_html(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
