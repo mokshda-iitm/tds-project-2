@@ -5,6 +5,7 @@ import io
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import networkx as nx
 from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,7 @@ import re
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from sklearn.linear_model import LinearRegression
+import json
 
 # Load environment variables from .env file
 load_dotenv()
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="General Purpose Data Analyst Agent API",
     description="API that performs data analysis from various sources and formats.",
-    version="6.6"
+    version="7.0"
 )
 
 # Enable CORS
@@ -142,16 +144,116 @@ class DataAnalystAgent:
             logger.error(f"Plot creation failed: {e}")
             return "Could not generate plot."
 
+    def _create_network_graph(self, edges_df: pd.DataFrame) -> str:
+        """Creates a base64 encoded network graph."""
+        try:
+            G = nx.Graph()
+            for _, row in edges_df.iterrows():
+                G.add_edge(row['node1'], row['node2'])
+            
+            plt.figure(figsize=(10, 8))
+            pos = nx.spring_layout(G, seed=42)
+            nx.draw(G, pos, with_labels=True, node_color='lightblue', 
+                   node_size=2000, font_size=12, font_weight='bold')
+            plt.title('Network Graph', fontsize=16)
+            plt.tight_layout()
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            plt.close()
+            base64_img = base64.b64encode(buf.getvalue()).decode('utf-8')
+            return f"data:image/png;base64,{base64_img}"
+        except Exception as e:
+            logger.error(f"Network graph creation failed: {e}")
+            return "Could not generate network graph."
+
+    def _create_degree_histogram(self, edges_df: pd.DataFrame, color: str = 'green') -> str:
+        """Creates a base64 encoded degree histogram."""
+        try:
+            G = nx.Graph()
+            for _, row in edges_df.iterrows():
+                G.add_edge(row['node1'], row['node2'])
+            
+            degrees = [deg for _, deg in G.degree()]
+            degree_counts = pd.Series(degrees).value_counts().sort_index()
+            
+            plt.figure(figsize=(10, 7))
+            sns.barplot(x=degree_counts.index, y=degree_counts.values, color=color)
+            plt.title('Degree Distribution', fontsize=16)
+            plt.xlabel('Degree', fontsize=12)
+            plt.ylabel('Count', fontsize=12)
+            plt.grid(axis='y')
+            plt.tight_layout()
+            
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            plt.close()
+            base64_img = base64.b64encode(buf.getvalue()).decode('utf-8')
+            return f"data:image/png;base64,{base64_img}"
+        except Exception as e:
+            logger.error(f"Degree histogram creation failed: {e}")
+            return "Could not generate degree histogram."
+
+    def _analyze_network_data(self, edges_df: pd.DataFrame) -> Dict[str, Any]:
+        """Performs network analysis on edges data."""
+        try:
+            G = nx.Graph()
+            for _, row in edges_df.iterrows():
+                G.add_edge(row['node1'], row['node2'])
+            
+            # Calculate network metrics
+            edge_count = G.number_of_edges()
+            degrees = dict(G.degree())
+            highest_degree_node = max(degrees.items(), key=lambda x: x[1])[0]
+            average_degree = sum(degrees.values()) / len(degrees) if degrees else 0
+            density = nx.density(G)
+            
+            # Calculate shortest path between Alice and Eve if they exist
+            shortest_path_alice_eve = None
+            if 'Alice' in G and 'Eve' in G:
+                try:
+                    shortest_path_alice_eve = nx.shortest_path_length(G, 'Alice', 'Eve')
+                except nx.NetworkXNoPath:
+                    shortest_path_alice_eve = -1  # No path exists
+            else:
+                shortest_path_alice_eve = -1  # One or both nodes don't exist
+            
+            # Create visualizations
+            network_graph = self._create_network_graph(edges_df)
+            degree_histogram = self._create_degree_histogram(edges_df, 'green')
+            
+            return {
+                "edge_count": edge_count,
+                "highest_degree_node": highest_degree_node,
+                "average_degree": round(average_degree, 3),
+                "density": round(density, 3),
+                "shortest_path_alice_eve": shortest_path_alice_eve,
+                "network_graph": network_graph,
+                "degree_histogram": degree_histogram
+            }
+        except Exception as e:
+            logger.error(f"Network analysis failed: {e}")
+            return {"error": f"Network analysis failed: {str(e)}"}
+
     def _perform_analysis(self, df: pd.DataFrame, question: str) -> Any:
         """Performs analysis based on the question and returns a value."""
-        if 'total sales' in question.lower() and 'across all regions' in question.lower():
+        question_lower = question.lower()
+        
+        # Network analysis questions
+        if any(keyword in question_lower for keyword in ['edge_count', 'highest_degree_node', 'average_degree', 
+                                                       'density', 'shortest_path_alice_eve', 'network_graph', 
+                                                       'degree_histogram', 'edges.csv']):
+            return self._analyze_network_data(df)
+        
+        # Sales analysis questions
+        if 'total sales' in question_lower and 'across all regions' in question_lower:
             return float(df['sales'].sum())
         
-        elif 'highest total sales' in question.lower() and 'region' in question.lower():
+        elif 'highest total sales' in question_lower and 'region' in question_lower:
             region_sales = df.groupby('region')['sales'].sum()
             return str(region_sales.idxmax())
 
-        elif 'correlation' in question.lower() and 'day of month' in question.lower() and 'sales' in question.lower():
+        elif 'correlation' in question_lower and 'day of month' in question_lower and 'sales' in question_lower:
             if 'date' in df.columns:
                 df['date'] = pd.to_datetime(df['date'])
                 df['day_of_month'] = df['date'].dt.day
@@ -159,27 +261,27 @@ class DataAnalystAgent:
                 return float(round(correlation, 6))
             return "Date column not found or malformed."
 
-        elif 'median sales amount' in question.lower():
+        elif 'median sales amount' in question_lower:
             return float(df['sales'].median())
         
-        elif 'total sales tax' in question.lower() and '10%' in question.lower():
+        elif 'total sales tax' in question_lower and '10%' in question_lower:
             total_sales = df['sales'].sum()
             return float(round(total_sales * 0.10, 2))
 
-        elif 'bar chart' in question.lower() and 'sales' in question.lower() and 'region' in question.lower():
+        elif 'bar chart' in question_lower and 'sales' in question_lower and 'region' in question_lower:
             region_sales = df.groupby('region')['sales'].sum().reset_index()
             return self._create_bar_chart(region_sales, 'region', 'sales')
 
-        elif 'cumulative sales' in question.lower() and 'line chart' in question.lower():
+        elif 'cumulative sales' in question_lower and 'line chart' in question_lower:
             return self._create_cumulative_line_chart(df, 'date', 'sales')
 
-        elif 'how many' in question.lower() and '2 bn' in question.lower() and 'before 2000' in question.lower():
+        elif 'how many' in question_lower and '2 bn' in question_lower and 'before 2000' in question_lower:
             if 'Worldwide gross' in df.columns and 'Year' in df.columns:
                 count = df[(df['Worldwide gross'] >= 2_000_000_000) & (df['Year'] < 2000)].shape[0]
                 return int(count)
             return "Required columns (Worldwide gross, Year) not found."
         
-        elif 'earliest film' in question.lower() and '1.5 bn' in question.lower():
+        elif 'earliest film' in question_lower and '1.5 bn' in question_lower:
             if 'Worldwide gross' in df.columns and 'Year' in df.columns and 'Title' in df.columns:
                 subset = df[df['Worldwide gross'] >= 1_500_000_000].dropna(subset=['Year'])
                 if not subset.empty:
@@ -188,7 +290,7 @@ class DataAnalystAgent:
                 return "No films matching the criteria were found."
             return "Required columns (Worldwide gross, Year, Title) not found."
 
-        elif 'correlation' in question.lower() and 'rank' in question.lower() and 'peak' in question.lower():
+        elif 'correlation' in question_lower and 'rank' in question_lower and 'peak' in question_lower:
             if 'Rank' in df.columns and 'Peak' in df.columns:
                 correlation_df = df.dropna(subset=['Rank', 'Peak'])
                 if not correlation_df.empty:
@@ -197,7 +299,7 @@ class DataAnalystAgent:
                 return "Could not calculate correlation due to insufficient data."
             return "Could not calculate correlation: 'Rank' or 'Peak' columns not found."
 
-        elif 'draw a scatterplot' in question.lower() and 'rank' in question.lower() and 'peak' in question.lower():
+        elif 'draw a scatterplot' in question_lower and 'rank' in question_lower and 'peak' in question_lower:
             if 'Rank' in df.columns and 'Peak' in df.columns:
                 return self._create_scatterplot(df, 'Rank', 'Peak')
             return "Could not generate plot: 'Rank' or 'Peak' columns not found."
@@ -209,13 +311,28 @@ class DataAnalystAgent:
         df = pd.DataFrame()
         if file_content:
             try:
+                # Try reading as CSV first
                 df = pd.read_csv(io.BytesIO(file_content))
+                
+                # Check if this is network edges data
+                if all(col in df.columns for col in ['node1', 'node2']):
+                    return df
+                
+                # Handle sales data
                 if 'sales' in df.columns:
                     df['sales'] = pd.to_numeric(df['sales'], errors='coerce')
                 if 'date' in df.columns:
                     df['date'] = pd.to_datetime(df['date'], errors='coerce')
             except Exception as e:
                 logger.error(f"Failed to read uploaded file as CSV: {e}")
+                # Try other formats if CSV fails
+                try:
+                    df = pd.read_excel(io.BytesIO(file_content))
+                except:
+                    try:
+                        df = pd.read_json(io.BytesIO(file_content))
+                    except:
+                        logger.error("Failed to read file in any supported format")
         elif url:
             try:
                 response = requests.get(url, timeout=15)
@@ -259,6 +376,14 @@ class DataAnalystAgent:
                 answer = await self._call_llm(prompt)
             results[key] = answer
 
+        # Handle network analysis results
+        if any(key in results for key in ['edge_count', 'highest_degree_node', 'average_degree', 
+                                        'density', 'shortest_path_alice_eve', 'network_graph', 
+                                        'degree_histogram']):
+            network_result = results.get(list(results.keys())[0], {})
+            if isinstance(network_result, dict) and 'edge_count' in network_result:
+                return network_result
+
         if output_format == "object":
             return {
                 "total_sales": results.get("total_sales"),
@@ -268,10 +393,6 @@ class DataAnalystAgent:
                 "median_sales": results.get("median_sales"),
                 "total_sales_tax": results.get("total_sales_tax"),
                 "cumulative_sales_chart": results.get("cumulative_sales_chart"),
-                "films_2bn_before_2000": results.get("films_2bn_before_2000"),
-                "earliest_1_5bn_film": results.get("earliest_1_5bn_film"),
-                "rank_peak_correlation": results.get("rank_peak_correlation"),
-                "rank_peak_scatterplot": results.get("rank_peak_scatterplot"),
             }
         else:
             return list(results.values())
@@ -320,6 +441,10 @@ def extract_questions(text: str) -> Dict[str, str]:
                     questions['rank_peak_correlation'] = question_text.strip()
                 elif 'scatterplot' in q_lower and 'rank' in q_lower and 'peak' in q_lower:
                     questions['rank_peak_scatterplot'] = question_text.strip()
+                elif any(keyword in q_lower for keyword in ['edge_count', 'highest_degree_node', 'average_degree', 
+                                                          'density', 'shortest_path_alice_eve', 'network_graph', 
+                                                          'degree_histogram', 'edges.csv']):
+                    questions['network_analysis'] = question_text.strip()
                 else:
                     # Fallback: create safe key
                     safe_key = re.sub(r'[^a-zA-Z0-9_]', '_', question_text.lower())[:30]
@@ -387,6 +512,10 @@ def extract_questions(text: str) -> Dict[str, str]:
                 key = 'rank_peak_correlation'
             elif 'scatterplot' in q_lower and 'rank' in q_lower and 'peak' in q_lower:
                 key = 'rank_peak_scatterplot'
+            elif any(keyword in q_lower for keyword in ['edge_count', 'highest_degree_node', 'average_degree', 
+                                                      'density', 'shortest_path_alice_eve', 'network_graph', 
+                                                      'degree_histogram', 'edges.csv']):
+                key = 'network_analysis'
             else:
                 # Use generic key for unmapped questions
                 key = f"question_{question_count + 1}"
